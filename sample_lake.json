@@ -1,0 +1,27 @@
+{
+  "mission": "sample_lake_coverage",
+  "description": "Sample waterbody near Bangalore — replace with your GIS polygon",
+  "units": "decimal degrees (WGS84)",
+  "ground_station": {
+    "lat": 12.97180,
+    "lon": 77.59475,
+    "note": "Launch point / home base"
+  },
+  "boundary": [
+    { "lat": 12.97192, "lon": 77.59480, "note": "SW corner" },
+    { "lat": 12.97230, "lon": 77.59510 },
+    { "lat": 12.97265, "lon": 77.59525, "note": "N peak" },
+    { "lat": 12.97290, "lon": 77.59510 },
+    { "lat": 12.97295, "lon": 77.59470, "note": "NE corner" },
+    { "lat": 12.97270, "lon": 77.59440 },
+    { "lat": 12.97230, "lon": 77.59430, "note": "SE corner" },
+    { "lat": 12.97200, "lon": 77.59445 },
+    { "lat": 12.97192, "lon": 77.59480, "note": "close polygon" }
+  ],
+  "config": {
+    "sweep_width_m": 3.0,
+    "sweep_angle_deg": 0,
+    "waypoint_radius_m": 2.0,
+    "cruise_speed": 0.6
+  }
+}
