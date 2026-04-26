@@ -11,6 +11,7 @@ controller.py          ← Main mission loop (10 Hz)
   ├── coverage_planner.py  ← Boustrophedon path generation
   ├── navigator.py     ← Pure-pursuit waypoint following
   ├── obstacle_handler.py  ← Reactive avoidance (thread-safe)
+  ├── converter.py     ← Convert different coordinate input format to expected format
   ├── recovery.py      ← Path rejoin after avoidance
   ├── hardware.py      ← MockHardware / RealHardware
   ├── utils.py         ← Haversine, bearing, geometry
