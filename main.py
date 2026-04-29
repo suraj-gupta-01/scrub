@@ -21,12 +21,19 @@ from pathlib import Path
 from controller import MissionController
 from hardware import create_hardware
 
+"""
+# Replace default logging config with our custom setup from log_setup.py.
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
+"""
 log = logging.getLogger("Main")
+
+from log_setup import setup_logging
+setup_logging()
 
 # ── Default file name ─────────────────────────────────────────────────────────
 DEFAULT_BOUNDARY_FILE = "mission_boundary.json"
