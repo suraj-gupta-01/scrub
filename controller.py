@@ -28,11 +28,13 @@ from sensor_hub import SensorHub, SensorSnapshot
 from heading_estimator import HeadingEstimator
 import config
 
+"""
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
+"""
 log = logging.getLogger("Controller")
 
 
