@@ -42,10 +42,10 @@ class MissionController:
 
     Architecture (v2):
       ┌──────────────────────────────────────────────────────────┐
-      │                    MissionController                      │
+      │                    MissionController                     │
       │                                                          │
-      │  SensorHub (producer threads)   Control Loop (consumer) │
-      │  ┌──────────┐ ┌──────────┐      snapshot() every tick   │
+      │  SensorHub (producer threads)   Control Loop (consumer)  │
+      │  ┌──────────┐ ┌──────────┐      snapshot() every tick    │
       │  │ GPS      │ │ Heading  │   →  navigator.update()       │
       │  │ producer │ │ producer │   →  obstacle_handler         │
       │  └──────────┘ └──────────┘   →  path_recovery            │

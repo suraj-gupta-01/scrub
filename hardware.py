@@ -5,14 +5,14 @@ Architecture change: Raspberry Pi 5 no longer talks to GPS or motors directly.
 All real-time hardware (GPS, motor ESCs) is owned by an STM32 microcontroller.
 The RPi communicates with the STM32 over a single UART serial link.
 
-                ┌─────────────────────────────────────┐
+                ┌──────────────────────────────────────┐
                 │         Raspberry Pi 5               │
                 │   (mission logic / navigation)       │
                 │          hardware.py                 │
                 └────────────┬─────────┬───────────────┘
                              │  UART   │
                              │ 115200  │
-                ┌────────────▼─────────▼───────────────┐
+                ┌────────────▼─────────▼────────────────┐
                 │           STM32 MCU                   │
                 │   - GPS UART (NMEA parsing)           │
                 │   - PWM ESC left/right                │
