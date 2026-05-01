@@ -149,6 +149,14 @@ def main():
         "--no-resume", action="store_true",
         help="Ignore saved mission state and restart from waypoint 0"
     )
+    parser.add_argument(
+        "--no-trash", action="store_true",
+        help="Disable trash collection even if enabled in config"
+    )
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Path to YOLO model (.pt file or .ncnn directory)"
+    )
     args = parser.parse_args()
 
     # ── Load mission boundary ─────────────────────────────────────────────
@@ -179,6 +187,9 @@ def main():
         sweep_width     = sweep_width,
         sweep_angle     = sweep_angle,
         resume          = not args.no_resume,
+        enable_trash    = not args.no_trash,
+        simulate        = args.sim,
+        model_path      = args.model,
     )
 
     log.info("Mission starting. Press Ctrl-C to stop gracefully.")
