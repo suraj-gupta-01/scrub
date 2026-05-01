@@ -223,7 +223,7 @@ class MissionController:
 
     # ── GPS fix wait ──────────────────────────────────────────────────────────
 
-    def _wait_for_gps_fix(self, timeout_s: float = 30.0) -> None:
+    def _wait_for_gps_fix(self, timeout_s: float = 900.0) -> None:
         """
         Block until the first valid GPS fix arrives, or timeout.
         Producer threads are already running, so we just poll the snapshot.
