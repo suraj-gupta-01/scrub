@@ -24,14 +24,33 @@ PROTOCOL
 --------
 RPi  → STM32  (commands):
     M <left> <right>\n       Motor set    e.g. "M 0.60 0.45\n"
-    S\n                      Emergency stop
+    E\n                      Emergency stop  (was 'S', renamed to avoid clash with sensor)
     P\n                      Ping (heartbeat)
 
-STM32 → RPi   (telemetry, 10 Hz):
-    G <lat> <lon> <fix>\n    GPS fix      e.g. "G 12.9719 77.5948 1\n"
-    H <heading>\n            Heading      e.g. "H 270.5\n"
+STM32 → RPi   (telemetry):
+    G <lat> <lon> <fix>\n    GPS fix @ up to 10 Hz  e.g. "G 12.9719 77.5948 1\n"
+    H <heading>\n            IMU heading @ up to 10 Hz  e.g. "H 270.5\n"
+    S <ph> <turb> <tds> <wtemp> <atemp> <hum> <co> <ch4>\n
+                             Sensor packet @ ~1 Hz (8 floats, space-separated)
+                             e.g. "S 7.12 4.50 285.0 26.1 31.2 65.0 3.8 420.0\n"
     A <status>\n             ACK/status   e.g. "A OK\n" or "A ERR\n"
     T <pong>\n               Ping reply   e.g. "T PONG\n"
+
+DESIGN RATIONALE — separate GPS and sensor update rates
+--------------------------------------------------------
+GPS (G) and heading (H) are navigation-critical: they feed the control
+loop at 10 Hz.  Water-quality sensors (pH, TDS, turbidity, …) change
+slowly — 1 Hz is more than sufficient and reduces UART bus load.
+Parsing sensor data in the same reader thread is safe because readline()
+processes whatever arrives; the slow sensor messages simply appear less
+often.  The control loop (sensor_hub.py) never blocks on sensor data.
+
+I²C alternative (commented for reference):
+    If the STM32 is replaced by a dedicated sensor MCU on I²C, use:
+    bus = smbus2.SMBus(1)                # RPi5 I²C-1 → GPIO 2/3
+    raw = bus.read_i2c_block_data(addr, reg, 16)
+    Sensor packets would be read inside _sensor_i2c_producer() at 1 Hz
+    and the rest of the architecture is unchanged.
 
 All tokens are ASCII. Lines end with '\n'. Values use '.' as decimal sep.
 Thread-safe: a background reader thread continuously drains the serial
@@ -43,6 +62,7 @@ import time
 import threading
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Tuple, Optional
 
 log = logging.getLogger(__name__)
@@ -54,7 +74,36 @@ READ_TIMEOUT_S   = 0.05      # serial read timeout (non-blocking feel)
 HEARTBEAT_HZ     = 2.0       # how often RPi pings STM32
 GPS_STALE_S      = 3.0       # seconds before GPS considered stale
 HEADING_STALE_S  = 3.0       # seconds before heading considered stale
+SENSOR_STALE_S   = 10.0      # seconds before sensor packet considered stale
 MAX_SEND_RETRIES = 3         # retries for motor commands on ACK timeout
+
+
+# ── Sensor reading dataclass ──────────────────────────────────────────────────
+
+@dataclass
+class SensorReading:
+    """
+    One complete water-quality + gas sensor packet from the STM32.
+    Matches the 'S' UART message: 8 floats in fixed order.
+    Fields align with the SCRUB dashboard column names.
+    """
+    ph:        float = 7.0
+    turbidity: float = 0.0    # NTU
+    tds:       float = 0.0    # ppm
+    watertemp: float = 25.0   # °C
+    ambitemp:  float = 30.0   # °C
+    humidity:  float = 60.0   # %
+    gasCO:     float = 0.0    # ppm
+    gasCH4:    float = 0.0    # ppm
+    timestamp: float = field(default_factory=time.monotonic)
+
+    # I²C alternative (for documentation):
+    # If sensors are wired to an I²C bus instead of through the STM32 UART,
+    # populate this dataclass from an smbus2 read:
+    #   import smbus2
+    #   bus = smbus2.SMBus(1)  # RPi5 I²C bus 1 (GPIO2=SDA, GPIO3=SCL)
+    #   raw = bus.read_i2c_block_data(SENSOR_I2C_ADDR, 0x00, 16)
+    #   # unpack raw bytes according to your sensor MCU protocol
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +128,10 @@ class HardwareInterface(ABC):
     @abstractmethod
     def get_heading(self) -> Optional[float]:
         """Return heading [0, 360) degrees or None when unavailable."""
+
+    @abstractmethod
+    def get_sensors(self) -> Optional["SensorReading"]:
+        """Return latest water-quality sensor packet, or None when unavailable."""
 
     @abstractmethod
     def stop(self) -> None:
@@ -133,6 +186,10 @@ class STM32Hardware(HardwareInterface):
         self._hdg_ts:     float           = 0.0
         self._last_ack:   str             = ""
 
+        # Water-quality / gas sensor state (updated ~1 Hz via 'S' messages)
+        self._sensor:     Optional[SensorReading] = None
+        self._sensor_ts:  float                   = 0.0
+
         # ── Background threads ────────────────────────────────────────────
         self._running     = True
         self._reader_thread    = threading.Thread(
@@ -175,11 +232,26 @@ class STM32Hardware(HardwareInterface):
                 return self._heading
         return None
 
+    def get_sensors(self) -> Optional[SensorReading]:
+        """
+        Return the latest SensorReading from the STM32 'S' message,
+        or None if no packet has arrived yet or it is stale.
+
+        Sensor data arrives at ~1 Hz — much slower than GPS (10 Hz).
+        This is intentional: water-quality sensors change slowly and
+        reducing UART traffic keeps GPS latency unaffected.
+        """
+        with self._lock:
+            age = time.monotonic() - self._sensor_ts
+            if self._sensor is not None and age < SENSOR_STALE_S:
+                return self._sensor
+        return None
+
     def stop(self) -> None:
         """Send emergency stop, then close serial."""
         self._running = False
         try:
-            self._send("S\n")
+            self._send("E\n")   # 'E' = Emergency stop ('S' is reserved for sensor messages)
             log.info("STM32Hardware: stop command sent.")
         except Exception:
             pass
@@ -246,6 +318,7 @@ class STM32Hardware(HardwareInterface):
         try:
             if msg_type == "G" and len(parts) >= 4:
                 # GPS:  G 12.971900 77.594700 1
+                # Arrives at up to 10 Hz — navigation-critical, always parsed.
                 lat = float(parts[1])
                 lon = float(parts[2])
                 fix = int(parts[3])            # 0=no fix, 1=GPS, 2=DGPS
@@ -258,11 +331,42 @@ class STM32Hardware(HardwareInterface):
 
             elif msg_type == "H" and len(parts) >= 2:
                 # Heading:  H 270.5
+                # Arrives at up to 10 Hz alongside GPS.
                 hdg = float(parts[1]) % 360.0
                 with self._lock:
                     self._heading = hdg
                     self._hdg_ts  = time.monotonic()
                 log.debug("Heading: %.1f°", hdg)
+
+            elif msg_type == "S" and len(parts) >= 9:
+                # Sensor packet:  S ph turb tds wtemp atemp hum co ch4
+                # Arrives at ~1 Hz. Parsed in the same reader thread as GPS
+                # but stored separately so the control loop is never blocked
+                # waiting for slow sensor data.
+                #
+                # I²C note: if sensors come via I²C instead of UART, replace
+                # this block with smbus2 reads inside a dedicated 1 Hz thread
+                # and populate SensorReading the same way.
+                reading = SensorReading(
+                    ph        = float(parts[1]),
+                    turbidity = float(parts[2]),
+                    tds       = float(parts[3]),
+                    watertemp = float(parts[4]),
+                    ambitemp  = float(parts[5]),
+                    humidity  = float(parts[6]),
+                    gasCO     = float(parts[7]),
+                    gasCH4    = float(parts[8]),
+                )
+                with self._lock:
+                    self._sensor    = reading
+                    self._sensor_ts = time.monotonic()
+                log.debug(
+                    "Sensors: pH=%.2f turb=%.1f TDS=%.0f wT=%.1f "
+                    "aT=%.1f hum=%.1f CO=%.1f CH4=%.0f",
+                    reading.ph, reading.turbidity, reading.tds,
+                    reading.watertemp, reading.ambitemp, reading.humidity,
+                    reading.gasCO, reading.gasCH4,
+                )
 
             elif msg_type == "A" and len(parts) >= 2:
                 # ACK:  A OK  or  A ERR
@@ -357,6 +461,14 @@ class MockHardware(HardwareInterface):
     def get_heading(self) -> Optional[float]:
         with self._lock:
             return self.heading
+
+    def get_sensors(self) -> Optional[SensorReading]:
+        """Simulation: return a static nominal sensor reading."""
+        return SensorReading(
+            ph=7.1, turbidity=3.5, tds=280.0,
+            watertemp=25.5, ambitemp=30.0,
+            humidity=62.0, gasCO=3.8, gasCH4=410.0,
+        )
 
     def stop(self) -> None:
         with self._lock:

@@ -108,6 +108,19 @@ class SensorSnapshot:
     obstacle_signal: str            = "NONE"
     obstacle_age_s:  float          = 999.0
 
+    # Water-quality / gas sensors (updated ~1 Hz from STM32 'S' messages)
+    # None means no packet received yet or packet is stale.
+    ph:             Optional[float] = None   # pH units
+    turbidity:      Optional[float] = None   # NTU
+    tds:            Optional[float] = None   # ppm
+    watertemp:      Optional[float] = None   # °C
+    ambitemp:       Optional[float] = None   # °C
+    humidity:       Optional[float] = None   # %
+    gasCO:          Optional[float] = None   # ppm
+    gasCH4:         Optional[float] = None   # ppm
+    sensor_age_s:   float           = 999.0  # seconds since last sensor packet
+    sensor_valid:   bool            = False  # True when a fresh packet exists
+
     # System health
     gps_valid:      bool            = False
     heading_valid:  bool            = False
@@ -149,6 +162,11 @@ class SensorHub:
         self._obstacle_signal: str             = "NONE"
         self._obstacle_ts:     float           = 0.0
 
+        # Water-quality / gas sensor state — updated ~1 Hz via hardware.get_sensors()
+        # Stored as a raw SensorReading to avoid importing hardware types everywhere.
+        self._sensor_reading:  object          = None   # SensorReading | None
+        self._sensor_ts:       float           = 0.0
+
         # Producer threads
         self._running = True
         self._threads: list = []
@@ -162,6 +180,8 @@ class SensorHub:
                              name="SensorHub-GPS",     daemon=True),
             threading.Thread(target=self._heading_producer,
                              name="SensorHub-HDG",     daemon=True),
+            threading.Thread(target=self._sensor_producer,
+                             name="SensorHub-SENS",    daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -181,16 +201,19 @@ class SensorHub:
         """
         now = time.monotonic()
         with self._lock:
-            gps_age = now - self._gps_ts if self._gps_ts > 0 else 999.0
-            hdg_age = now - self._heading_ts if self._heading_ts > 0 else 999.0
-            obs_age = now - self._obstacle_ts if self._obstacle_ts > 0 else 999.0
+            gps_age  = now - self._gps_ts     if self._gps_ts     > 0 else 999.0
+            hdg_age  = now - self._heading_ts  if self._heading_ts  > 0 else 999.0
+            obs_age  = now - self._obstacle_ts if self._obstacle_ts > 0 else 999.0
+            sens_age = now - self._sensor_ts   if self._sensor_ts   > 0 else 999.0
 
-            gps_valid = (
+            gps_valid  = (
                 self._lat is not None
                 and self._gps_fix > 0
                 and gps_age < GPS_STALE_S
             )
-            hdg_valid = hdg_age < HEADING_STALE_S
+            hdg_valid  = hdg_age  < HEADING_STALE_S
+            sens_valid = (self._sensor_reading is not None
+                          and sens_age < OBS_STALE_S)   # reuse 10 s stale threshold
 
             # Auto-clear obstacle signal if stale
             obs_sig = self._obstacle_signal
@@ -199,19 +222,32 @@ class SensorHub:
                 obs_sig = "NONE"
                 log.debug("Obstacle signal auto-cleared (stale).")
 
+            # Unpack sensor reading fields (or leave as None if no data)
+            sr = self._sensor_reading
             return SensorSnapshot(
-                lat             = self._lat if gps_valid else None,
-                lon             = self._lon if gps_valid else None,
-                gps_fix         = self._gps_fix,
-                gps_age_s       = gps_age,
-                heading_deg     = self._heading_deg,
-                heading_source  = self._heading_source,
-                heading_reliable= self._heading_reliable,
-                heading_valid   = hdg_valid,
-                obstacle_signal = obs_sig,
-                obstacle_age_s  = obs_age,
-                gps_valid       = gps_valid,
-                timestamp       = now,
+                lat              = self._lat if gps_valid else None,
+                lon              = self._lon if gps_valid else None,
+                gps_fix          = self._gps_fix,
+                gps_age_s        = gps_age,
+                heading_deg      = self._heading_deg,
+                heading_source   = self._heading_source,
+                heading_reliable = self._heading_reliable,
+                heading_valid    = hdg_valid,
+                obstacle_signal  = obs_sig,
+                obstacle_age_s   = obs_age,
+                # Water-quality sensors — None when no fresh packet
+                ph               = sr.ph        if sens_valid else None,
+                turbidity        = sr.turbidity  if sens_valid else None,
+                tds              = sr.tds        if sens_valid else None,
+                watertemp        = sr.watertemp  if sens_valid else None,
+                ambitemp         = sr.ambitemp   if sens_valid else None,
+                humidity         = sr.humidity   if sens_valid else None,
+                gasCO            = sr.gasCO      if sens_valid else None,
+                gasCH4           = sr.gasCH4     if sens_valid else None,
+                sensor_age_s     = sens_age,
+                sensor_valid     = sens_valid,
+                gps_valid        = gps_valid,
+                timestamp        = now,
             )
 
     # ── Producer API (called by sensor threads or external code) ──────────────
@@ -305,13 +341,65 @@ class SensorHub:
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, interval - elapsed))
 
+    def _sensor_producer(self) -> None:
+        """
+        Polls water-quality / gas sensor data from hardware at ~1 Hz.
+
+        Runs at a MUCH lower rate than the GPS and heading producers because:
+          • Water-quality parameters (pH, TDS, turbidity) change on a scale
+            of seconds to minutes — 1 Hz gives more than enough resolution.
+          • Keeping sensor traffic at 1 Hz means the UART bus is dominated
+            by high-priority GPS frames (10 Hz), not sensor data.
+          • The control loop (navigator, obstacle handler, trash handler)
+            never reads sensor values directly, so there is zero latency
+            impact on navigation from a slow sensor update rate.
+
+        The snapshot() method exposes sensor_valid=False until the first
+        packet arrives, so the controller can gate on freshness if needed.
+
+        I²C alternative (commented for reference):
+            If sensor data arrives over I²C rather than through the STM32
+            UART, replace the self._hw.get_sensors() call with:
+                import smbus2
+                bus = smbus2.SMBus(1)  # GPIO2=SDA GPIO3=SCL on RPi5
+                raw = bus.read_i2c_block_data(addr, reg, nbytes)
+                # parse raw into SensorReading fields
+            The rest of this thread (lock update, logging) stays the same.
+        """
+        log.debug("Sensor producer thread started (1 Hz).")
+        interval = 1.0   # 1 Hz — intentionally slow; see rationale above
+
+        while self._running:
+            t0 = time.monotonic()
+            try:
+                reading = self._hw.get_sensors()
+                if reading is not None:
+                    with self._lock:
+                        self._sensor_reading = reading
+                        self._sensor_ts      = time.monotonic()
+                    log.debug(
+                        "Sensors: pH=%.2f turb=%.1f TDS=%.0f wT=%.1f "
+                        "aT=%.1f hum=%.1f CO=%.1f CH4=%.0f",
+                        reading.ph, reading.turbidity, reading.tds,
+                        reading.watertemp, reading.ambitemp,
+                        reading.humidity, reading.gasCO, reading.gasCH4,
+                    )
+
+            except Exception as exc:
+                log.warning("Sensor producer error: %s", exc)
+
+            elapsed = time.monotonic() - t0
+            time.sleep(max(0.0, interval - elapsed))
+
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
     def status_line(self) -> str:
         snap = self.snapshot()
+        sens = "OK" if snap.sensor_valid else f"STALE({snap.sensor_age_s:.0f}s)"
         return (
             f"SensorHub | GPS={'OK' if snap.gps_valid else 'STALE'} "
             f"({snap.gps_age_s:.1f}s) | "
             f"HDG={snap.heading_deg:.1f}°[{snap.heading_source}] | "
-            f"OBS={snap.obstacle_signal}"
+            f"OBS={snap.obstacle_signal} | "
+            f"SENS={sens}"
         )

@@ -335,6 +335,14 @@ class MissionController:
                 ]
                 if self._trash_enabled and self.trash_handler is not None:
                     parts.append(self.trash_handler.status_line())
+                # Log sensor readings if a fresh packet is available
+                if snap.sensor_valid:
+                    parts.append(
+                        f"SENSORS pH={snap.ph:.2f} turb={snap.turbidity:.1f}NTU "
+                        f"TDS={snap.tds:.0f}ppm wT={snap.watertemp:.1f}°C "
+                        f"aT={snap.ambitemp:.1f}°C hum={snap.humidity:.0f}% "
+                        f"CO={snap.gasCO:.1f}ppm CH4={snap.gasCH4:.0f}ppm"
+                    )
                 log.info(" | ".join(parts))
 
             # ── Timing: sleep remainder of loop period ────────────────────────

@@ -8,7 +8,7 @@ Usage:
     python3 main.py                                  # real STM32 hardware
     python3 main.py --sim                            # desktop simulation
     python3 main.py --file my_lake.json              # custom boundary file
-    python3 main.py --sim --sweep 4 --angle 30      # sim with custom sweep
+    python3 main.py --sim --sweep 4 --angle 30       # sim with custom sweep
     python3 main.py --no-resume                      # restart mission fresh
 """
 
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from controller import MissionController
 from hardware import create_hardware
+from sensor_bridge import SensorBridge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -157,6 +158,14 @@ def main():
         "--model", type=str, default=None,
         help="Path to YOLO model (.pt file or .ncnn directory)"
     )
+    parser.add_argument(
+        "--bridge-port", type=int, default=5000,
+        help="HTTP port for the sensor bridge dashboard endpoint (default: 5000)"
+    )
+    parser.add_argument(
+        "--no-bridge", action="store_true",
+        help="Disable the sensor bridge HTTP server"
+    )
     args = parser.parse_args()
 
     # ── Load mission boundary ─────────────────────────────────────────────
@@ -193,6 +202,22 @@ def main():
     )
 
     log.info("Mission starting. Press Ctrl-C to stop gracefully.")
+
+    # ── Start sensor bridge (dashboard HTTP endpoint) ─────────────────────
+    # This serves GET /sensor_data to the Streamlit dashboard so it can
+    # display live GPS position and all 8 sensor readings.
+    # Runs as a daemon thread — automatically stops when the process exits.
+    if not args.no_bridge:
+        bridge = SensorBridge(sensor_hub=mc.sensor_hub, port=args.bridge_port)
+        bridge.start()
+        log.info(
+            "Sensor bridge listening on http://0.0.0.0:%d/sensor_data  "
+            "(set dashboard RPi IP to this machine's address)",
+            args.bridge_port,
+        )
+    else:
+        log.info("Sensor bridge disabled (--no-bridge).")
+
     mc.run()
 
 
